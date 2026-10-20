@@ -57,66 +57,117 @@ jobs:
           sudo chmod a+rw /dev/kvm
       - name: Prepare installation diagnostics script
         run: |
+          python3 -m pip install --disable-pip-version-check --target /tmp/tidewater-test-tools websocket-client pillow
           cat > /tmp/tidewater-install-test.py <<'PY'
-          import base64
-          import hashlib
-          import json
-          import os
-          import pathlib
-          import re
-          import subprocess
-          import time
-          import traceback
+          import base64, io, json, pathlib, re, subprocess, sys, time, traceback, urllib.request
+          sys.path.insert(0, "/tmp/tidewater-test-tools")
+          import websocket
+          from PIL import Image
           
           out = pathlib.Path("install-diagnostics")
           out.mkdir(exist_ok=True)
-          result = {}
-          def command(args, required=True):
-              p = subprocess.run(args, capture_output=True, text=True, timeout=120)
+          result = {"apkUnchanged": True, "phases": []}
+          package = "dev.sencao.tidewater.verification"
+          activity = package + "/dev.sencao.tidewater.MainActivity"
+          
+          def command(args, required=True, timeout=120):
+              p = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
               print("$ " + " ".join(args), flush=True)
-              print(p.stdout, flush=True)
-              if p.stderr:
-                  print(p.stderr, flush=True)
+              print((p.stdout + p.stderr)[-14000:], flush=True)
               if required and p.returncode:
                   raise RuntimeError("Command failed: " + " ".join(args))
               return p
           
+          def screenshot(name):
+              p = subprocess.run(["adb", "exec-out", "screencap", "-p"], capture_output=True, timeout=30)
+              if p.returncode == 0 and p.stdout.startswith(b"\x89PNG"):
+                  raw = io.BytesIO()
+                  im = Image.open(io.BytesIO(p.stdout))
+                  im.thumbnail((1280, 720))
+                  im.save(raw, format="PNG")
+                  data = raw.getvalue()
+                  (out / (name + ".png")).write_bytes(data)
+                  encoded = base64.b64encode(data).decode()
+                  for i in range(0, len(encoded), 2500):
+                      print("SCREENSHOT_" + name + "_CHUNK " + str(i // 2500) + " " + encoded[i:i+2500], flush=True)
+          
+          def evaluate(expression):
+              pid = command(["adb", "shell", "pidof", package], False).stdout.strip().split()[0]
+              command(["adb", "forward", "tcp:9222", "localabstract:webview_devtools_remote_" + pid])
+              targets = json.load(urllib.request.urlopen("http://127.0.0.1:9222/json", timeout=15))
+              target = next(t for t in targets if t.get("type") == "page")
+              ws = websocket.create_connection(target["webSocketDebuggerUrl"], suppress_origin=True, timeout=90)
+              try:
+                  ws.send(json.dumps({"id": 1, "method": "Runtime.evaluate", "params": {"expression": expression, "returnByValue": True, "awaitPromise": True}}))
+                  while True:
+                      response = json.loads(ws.recv())
+                      if response.get("id") == 1:
+                          if response.get("error"):
+                              raise RuntimeError(str(response["error"]))
+                          return response.get("result", {}).get("result", {}).get("value", response)
+              finally:
+                  ws.close()
+          
+          def inspect(name):
+              phase = {"name": name}
+              try:
+                  phase["report"] = evaluate("window.__TIDE_REPORT__ ? window.__TIDE_REPORT__() : {body: document.body.innerText}")
+                  phase["body"] = evaluate("document.body.innerText.slice(0, 6000)")
+              except Exception as error:
+                  phase["inspectionError"] = str(error)
+              phase["processAlive"] = bool(command(["adb", "shell", "pidof", package], False).stdout.strip())
+              screenshot(name)
+              result["phases"].append(phase)
+              print("PHASE_RESULT_JSON " + json.dumps(phase, ensure_ascii=False), flush=True)
+              return phase
+          
           try:
               result["android"] = command(["adb", "shell", "getprop", "ro.build.version.release"]).stdout.strip()
               result["api"] = command(["adb", "shell", "getprop", "ro.build.version.sdk"]).stdout.strip()
+              result["buildType"] = command(["adb", "shell", "getprop", "ro.build.type"]).stdout.strip()
+              command(["adb", "shell", "wm", "size", "720x1280"])
+              command(["adb", "shell", "wm", "density", "240"])
+              command(["adb", "shell", "settings", "put", "secure", "immersive_mode_confirmations", "confirmed"], False)
               command(["adb", "logcat", "-c"])
-              install = command(["adb", "install", "-r", "deliverables/Tidewater.apk"], required=False)
+              install = command(["adb", "install", "-r", "deliverables/Tidewater.apk"], False)
               result["installOutput"] = install.stdout + install.stderr
               result["installed"] = install.returncode == 0 and "Success" in install.stdout
               if not result["installed"]:
-                  raise RuntimeError("Android Package Manager rejected the APK.")
-              command(["adb", "shell", "pm", "path", "dev.sencao.tidewater.verification"])
-              launched = command(["adb", "shell", "am", "start", "-W", "-n", "dev.sencao.tidewater.verification/dev.sencao.tidewater.MainActivity"], required=False)
-              result["launchOutput"] = launched.stdout + launched.stderr
+                  raise RuntimeError("Android Package Manager rejected the APK")
+              command(["adb", "shell", "am", "start", "-W", "-n", activity])
               time.sleep(12)
-              process = command(["adb", "shell", "pidof", "dev.sencao.tidewater.verification"], required=False)
-              result["processAlive"] = bool(process.stdout.strip())
-              crash = command(["adb", "logcat", "-d", "-b", "crash"], required=False).stdout
-              (out / "crash-log.txt").write_text(crash)
-              result["crashLog"] = crash[-15000:]
-              command(["adb", "shell", "uiautomator", "dump", "/sdcard/tidewater-ui.xml"], required=False)
-              hierarchy = command(["adb", "shell", "cat", "/sdcard/tidewater-ui.xml"], required=False).stdout
-              (out / "window.xml").write_text(hierarchy)
-              result["screenText"] = re.findall(r'text="([^"]*)"', hierarchy)
-              result["appLogs"] = command(["adb", "logcat", "-d", "-s", "Tidewater:D", "AndroidRuntime:E", "chromium:E"], required=False).stdout[-24000:]
-              (out / "app-log.txt").write_text(result["appLogs"])
-              if not result["processAlive"]:
-                  raise RuntimeError("App process exited after launch.")
+              inspect("default")
+              command(["adb", "shell", "am", "force-stop", package])
+              command(["adb", "root"], False)
+              command(["adb", "wait-for-device"])
+              flags = "_ --enable-unsafe-webgpu --ignore-gpu-blocklist --webview-verbose-logging\n"
+              pathlib.Path("/tmp/tidewater-webview-flags").write_text(flags)
+              command(["adb", "push", "/tmp/tidewater-webview-flags", "/data/local/tmp/webview-command-line"])
+              command(["adb", "shell", "chmod", "644", "/data/local/tmp/webview-command-line"])
+              command(["adb", "shell", "setprop", "debug.hwui.renderer", "skiavk"])
+              result["emulatorOnlyConfiguration"] = {"webviewFlags": flags.strip(), "hwuiRenderer": "skiavk"}
+              command(["adb", "shell", "am", "start", "-W", "-n", activity], False)
+              time.sleep(15)
+              phase = inspect("vulkan_diagnostic")
+              for attempt in range(18):
+                  report = phase.get("report", {})
+                  if report.get("ready") or report.get("stage") == "运行失败" or not phase["processAlive"]:
+                      break
+                  time.sleep(5)
+                  phase = {"processAlive": True, "report": evaluate("window.__TIDE_REPORT__ ? window.__TIDE_REPORT__() : {}")}
+              final = inspect("final")
+              result["gameReadyWithEmulatorConfiguration"] = bool(final.get("report", {}).get("ready"))
           finally:
-              shot = subprocess.run(["adb", "exec-out", "screencap", "-p"], capture_output=True, timeout=30)
-              if shot.returncode == 0 and shot.stdout.startswith(b"\x89PNG"):
-                  (out / "screen.png").write_bytes(shot.stdout)
-                  encoded = base64.b64encode(shot.stdout).decode()
-                  print("SCREENSHOT_LENGTH " + str(len(encoded)), flush=True)
-                  for i in range(0, len(encoded), 2500):
-                      print("SCREENSHOT_CHUNK " + str(i // 2500) + " " + encoded[i:i+2500], flush=True)
+              log = command(["adb", "logcat", "-d"], False).stdout
+              (out / "full-logcat.txt").write_text(log)
+              useful = "\n".join(l for l in log.splitlines() if re.search("Tidewater|WebGPU|webgpu|Vulkan|vulkan|FATAL|Fatal|WebViewCommandLine|Dawn", l))
+              result["graphicsLogs"] = useful[-28000:]
+              (out / "graphics-log.txt").write_text(useful)
+              result["crashLog"] = command(["adb", "logcat", "-d", "-b", "crash"], False).stdout[-16000:]
               (out / "install-result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
               print("INSTALL_RESULT_JSON " + json.dumps(result, ensure_ascii=False), flush=True)
+          if not result.get("gameReadyWithEmulatorConfiguration"):
+              raise RuntimeError("APK installation passed, but the game has not reached a playable scene in this emulator")
           PY
       - name: Install and launch on Android 16
         uses: reactivecircus/android-emulator-runner@v2
