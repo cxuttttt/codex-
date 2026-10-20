@@ -21,7 +21,11 @@ export class MobileControls {
     const tapButton = (label, code) => {
       const button = el('button', 'tw-mobile-small', label);
       button.type = 'button';
-      button.addEventListener('click', () => this.input.tap(code));
+      button.addEventListener('click', () => {
+        const hud = window.__tideApp?.game?.hud;
+        if (code === 'KeyI' && hud?.invOpen) hud.toggleInventory(false);
+        else this.input.tap(code);
+      });
       top.append(button);
     };
     tapButton('背包', 'KeyI');

@@ -95,6 +95,8 @@ export function openPanel() {
   savedEnabled = input?.enabled ?? true;
   if (input) { input.reset(); input.enabled = false; }
   window.__tidePanelOpen = true;
+  const select = panel.querySelector('select');
+  if (select) select.value = String(window.__tideApp?.settings?.renderScale || 0.7);
   diagnostics.value = JSON.stringify(reportObject(), null, 2);
   panel.showModal();
 }

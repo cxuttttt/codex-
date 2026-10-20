@@ -31,8 +31,8 @@ jobs:
       - name: Preserve verification APK signing key across builds
         uses: actions/cache@v4
         with:
-          path: ~/.android/debug.keystore
-          key: tidewater-verification-debug-key-v1
+          path: ${{ runner.temp }}/tidewater-verification-debug.keystore
+          key: tidewater-verification-debug-key-v2
       - name: Install Android command-line tools
         uses: android-actions/setup-android@v3
         with:
@@ -49,8 +49,15 @@ jobs:
         run: node scripts/check-mobile.mjs
       - name: Build and bundle the complete game
         run: node scripts/bundle.mjs
+      - name: Prepare stable verification signing key
+        run: |
+          if [ ! -f "$RUNNER_TEMP/tidewater-verification-debug.keystore" ]; then
+            keytool -genkeypair -noprompt -keystore "$RUNNER_TEMP/tidewater-verification-debug.keystore" -storepass android -keypass android -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname 'CN=Tidewater Verification,O=Local Development,C=CN'
+          fi
       - name: Compile Android verification APK
         working-directory: android
+        env:
+          TIDEWATER_VERIFICATION_KEYSTORE: ${{ runner.temp }}/tidewater-verification-debug.keystore
         run: gradle --no-daemon assembleDebug lintDebug
       - name: Verify packaged resources and record SHA256
         run: python3 scripts/verify-apk.py
@@ -58,10 +65,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: tidewater-android-verification
-          path: |
-            android/app/build/outputs/apk/debug/app-debug.apk
-            build-report.json
-            SHA256SUMS.txt
+          path: deliverables/
           if-no-files-found: error
           retention-days: 30
       - name: Upload Android lint report

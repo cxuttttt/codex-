@@ -16,7 +16,7 @@
 
 ## 安装与验证
 
-从 Actions 的最新成功构建下载 tidewater-android-verification，解压后安装 app-debug.apk。
+从 Actions 的最新成功构建下载 tidewater-android-verification，解压后安装 Tidewater.apk。
 这是带调试签名的验证版，不是应用商店发布版。
 首次进入可能需要较长时间编译着色器。保持前台，完成后点击进入场景。
 

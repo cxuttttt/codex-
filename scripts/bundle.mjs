@@ -13,6 +13,7 @@ cpSync('upstream/dist', dest, { recursive: true });
 const credits = join(dest, 'licenses');
 mkdirSync(credits, { recursive: true });
 for (const name of ['LICENSE', 'CREDITS.md']) cpSync(join('upstream', name), join(credits, name));
+cpSync('LICENSE', join(credits, 'LICENSE-mobile.txt'));
 const sourcePublic = resolve('upstream/public');
 const manifest = [];
 function scan(dir) {
