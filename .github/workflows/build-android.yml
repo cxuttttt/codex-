@@ -3,6 +3,9 @@ name: Build Tidewater Android
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '.github/workflows/deliver-apk.yml'
+      - 'scripts/publish-apk.py'
   workflow_dispatch:
 
 permissions:
