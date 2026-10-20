@@ -1,0 +1,11 @@
+{
+  "name": "tidewater-android-verification",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "prepare": "node scripts/prepare-upstream.mjs",
+    "check": "node scripts/check-mobile.mjs",
+    "bundle": "node scripts/bundle.mjs"
+  }
+}

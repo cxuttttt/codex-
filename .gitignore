@@ -1,0 +1,8 @@
+upstream/
+android/.gradle/
+android/local.properties
+android/**/build/
+build-report.json
+SHA256SUMS.txt
+*.jks
+*.keystore

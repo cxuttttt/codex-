@@ -1,0 +1,45 @@
+html, body { overscroll-behavior: none; -webkit-tap-highlight-color: transparent; }
+#app canvas { touch-action: none; }
+.tw-mobile-controls { position: fixed; inset: 0; pointer-events: none; z-index: 80; user-select: none; -webkit-user-select: none; }
+.tw-mobile-controls[hidden] { display: none; }
+.tw-mobile-controls button, .tw-mobile-stick { pointer-events: auto; touch-action: none; }
+.tw-mobile-controls button, .tw-mobile-panel button, .tw-mobile-fatal button, .tw-mobile-badge {
+  border: 1px solid rgba(230,246,255,.4); border-radius: 16px; color: #f8fbff; background: rgba(7,27,39,.78);
+  font: 600 13px/1.3 system-ui,sans-serif; padding: 10px 14px; min-height: 44px; cursor: pointer;
+}
+.tw-mobile-top { position: absolute; top: max(10px, env(safe-area-inset-top)); left: max(12px, env(safe-area-inset-left)); display: flex; gap: 7px; }
+.tw-mobile-controls .tw-mobile-small { min-height: 38px; padding: 8px 12px; border-radius: 12px; }
+.tw-mobile-context { position: absolute; top: max(60px, calc(env(safe-area-inset-top) + 50px)); left: 50%; transform: translateX(-50%); max-width: 48vw; color: white; text-shadow: 0 2px 4px #000; font: 600 12px/1.4 system-ui,sans-serif; text-align: center; }
+.tw-mobile-stick { position: absolute; left: max(25px, calc(env(safe-area-inset-left) + 16px)); bottom: max(24px, calc(env(safe-area-inset-bottom) + 16px)); width: 126px; height: 126px; border: 1px solid rgba(255,255,255,.4); border-radius: 50%; background: rgba(8,28,41,.33); }
+.tw-mobile-stick-label { position: absolute; bottom: 9px; width: 100%; color: rgba(255,255,255,.75); font: 11px system-ui; text-align: center; }
+.tw-mobile-knob { display: block; position: absolute; width: 46px; height: 46px; left: calc(50% - 23px); top: calc(50% - 23px); border-radius: 50%; background: rgba(239,249,255,.7); border: 1px solid rgba(255,255,255,.7); pointer-events: none; }
+.tw-mobile-actions { position: absolute; bottom: max(18px, calc(env(safe-area-inset-bottom) + 10px)); right: max(18px, calc(env(safe-area-inset-right) + 10px)); display: grid; grid-template-columns: repeat(4, minmax(58px, 76px)); gap: 7px; align-items: end; }
+.tw-mobile-controls .tw-mobile-action { padding: 10px 5px; min-height: 48px; background: rgba(7,27,39,.68); }
+.tw-mobile-controls .tw-mobile-primary { background: rgba(9,101,112,.85); }
+.tw-mobile-controls .tw-mobile-fish { grid-column: span 2; background: rgba(21,84,107,.85); }
+.tw-mobile-controls .is-down { background: rgba(104,202,210,.9); color: #06232c; }
+.tw-mobile-modal .tw-mobile-lower, .tw-mobile-modal .tw-mobile-context { display: none; }
+.tw-mobile-badge { position: fixed; top: max(10px, env(safe-area-inset-top)); right: max(12px, env(safe-area-inset-right)); z-index: 10001; font-size: 11px; min-height: 34px; padding: 7px 10px; max-width: 48vw; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.tw-mobile-panel { box-sizing: border-box; width: min(680px, 94vw); max-height: 90dvh; overflow: auto; background: #0d2330; color: #edf8ff; border: 1px solid #557a8c; border-radius: 20px; padding: 20px; font: 14px/1.5 system-ui,sans-serif; z-index: 2147483647; }
+.tw-mobile-panel::backdrop { background: rgba(0,8,16,.75); }
+.tw-mobile-panel h2 { font-size: 20px; margin: 0 0 10px; }
+.tw-mobile-note { color: #b6cbd6; font-size: 12px; line-height: 1.65; }
+.tw-mobile-quality { display: flex; align-items: center; gap: 12px; margin: 16px 0; }
+.tw-mobile-quality select { background: #173847; color: white; border: 1px solid #668594; padding: 10px; border-radius: 10px; font-size: 14px; }
+.tw-mobile-tools { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.tw-mobile-diagnostics { box-sizing: border-box; width: 100%; height: 140px; min-height: 80px; background: #081924; color: #b7d8e8; border: 1px solid #365563; border-radius: 10px; padding: 10px; font: 11px/1.5 monospace; }
+.tw-mobile-fatal { position: fixed; z-index: 2147483646; inset: 0; overflow: auto; box-sizing: border-box; padding: max(24px, env(safe-area-inset-top)) max(24px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(24px, env(safe-area-inset-left)); color: #f5fbff; background: #0a1e2a; font: 15px/1.65 system-ui; }
+.tw-mobile-fatal p { max-width: 800px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tw-mobile-fatal button { margin: 12px 10px 0 0; }
+@media (pointer: coarse) {
+  #fps { display: none !important; }
+  .tw-rail { display: none !important; }
+  .tw-panel { max-width: min(420px, 75vw); }
+}
+@media (max-height: 420px) {
+  .tw-mobile-stick { width: 104px; height: 104px; bottom: max(16px, env(safe-area-inset-bottom)); }
+  .tw-mobile-actions { grid-template-columns: repeat(4, 64px); gap: 5px; bottom: max(12px, env(safe-area-inset-bottom)); }
+  .tw-mobile-controls .tw-mobile-action { font-size: 11px; min-height: 42px; padding: 7px 4px; }
+  .tw-mobile-panel { padding: 14px; }
+  .tw-mobile-diagnostics { height: 100px; }
+}
