@@ -33,6 +33,11 @@ jobs:
         with:
           path: ~/.android/debug.keystore
           key: tidewater-verification-debug-key-v1
+      - name: Install Android command-line tools
+        uses: android-actions/setup-android@v3
+        with:
+          packages: ''
+          log-accepted-android-sdk-licenses: false
       - name: Ensure Android SDK components
         run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
       - name: Fetch pinned upstream and prepare mobile build
