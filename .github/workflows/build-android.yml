@@ -1,0 +1,59 @@
+name: Build Tidewater Android
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tidewater-android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+      - name: Fetch pinned upstream and prepare mobile build
+        run: node scripts/prepare-upstream.mjs
+      - name: Install upstream dependencies
+        working-directory: upstream
+        run: npm ci
+      - name: Check mobile code and upstream game logic
+        run: node scripts/check-mobile.mjs
+      - name: Build and bundle the complete game
+        run: node scripts/bundle.mjs
+      - name: Compile Android verification APK
+        working-directory: android
+        run: gradle --no-daemon assembleDebug lintDebug
+      - name: Verify packaged resources and record SHA256
+        run: python3 scripts/verify-apk.py
+      - name: Upload APK and build report
+        uses: actions/upload-artifact@v4
+        with:
+          name: tidewater-android-verification
+          path: |
+            android/app/build/outputs/apk/debug/app-debug.apk
+            build-report.json
+            SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload Android lint report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-lint-report
+          path: android/app/build/reports/lint-results-debug.html
+          if-no-files-found: ignore
