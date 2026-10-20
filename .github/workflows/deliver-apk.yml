@@ -25,3 +25,115 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 scripts/publish-apk.py
+
+  android-install-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
+          log-accepted-android-sdk-licenses: false
+      - name: Download the publicly delivered APK and verify its exact bytes
+        run: |
+          mkdir -p deliverables
+          python3 - <<'PY'
+          import hashlib, pathlib, urllib.request
+          url = 'https://github.com/cxuttttt/codex-/releases/download/tidewater-android-verification-0.1.0/Tidewater.apk'
+          with urllib.request.urlopen(url, timeout=120) as response:
+              data = response.read()
+          assert len(data) == 53313977, 'Unexpected APK download size'
+          assert hashlib.sha256(data).hexdigest() == '10d699d70ec9771b79ce86e3237bb0f7bc4f856b561485c7dc7829c854a186eb', 'APK download is incomplete or changed'
+          pathlib.Path('deliverables/Tidewater.apk').write_bytes(data)
+          print('Public download verified:', len(data), 'bytes')
+          PY
+      - name: Enable emulator hardware acceleration
+        run: |
+          sudo chmod a+rw /dev/kvm
+      - name: Install and launch on Android 16
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 36
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7
+          cores: 2
+          ram-size: 3072M
+          emulator-boot-timeout: 600
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none -camera-front none
+          disable-animations: true
+          script: |
+            python3 - <<'PY'
+            import base64
+            import hashlib
+            import json
+            import os
+            import pathlib
+            import re
+            import subprocess
+            import time
+            import traceback
+            
+            out = pathlib.Path("install-diagnostics")
+            out.mkdir(exist_ok=True)
+            result = {}
+            def command(args, required=True):
+                p = subprocess.run(args, capture_output=True, text=True, timeout=120)
+                print("$ " + " ".join(args), flush=True)
+                print(p.stdout, flush=True)
+                if p.stderr:
+                    print(p.stderr, flush=True)
+                if required and p.returncode:
+                    raise RuntimeError("Command failed: " + " ".join(args))
+                return p
+            
+            try:
+                result["android"] = command(["adb", "shell", "getprop", "ro.build.version.release"]).stdout.strip()
+                result["api"] = command(["adb", "shell", "getprop", "ro.build.version.sdk"]).stdout.strip()
+                command(["adb", "logcat", "-c"])
+                install = command(["adb", "install", "-r", "deliverables/Tidewater.apk"], required=False)
+                result["installOutput"] = install.stdout + install.stderr
+                result["installed"] = install.returncode == 0 and "Success" in install.stdout
+                if not result["installed"]:
+                    raise RuntimeError("Android Package Manager rejected the APK.")
+                command(["adb", "shell", "pm", "path", "dev.sencao.tidewater.verification"])
+                launched = command(["adb", "shell", "am", "start", "-W", "-n", "dev.sencao.tidewater.verification/dev.sencao.tidewater.MainActivity"], required=False)
+                result["launchOutput"] = launched.stdout + launched.stderr
+                time.sleep(12)
+                process = command(["adb", "shell", "pidof", "dev.sencao.tidewater.verification"], required=False)
+                result["processAlive"] = bool(process.stdout.strip())
+                crash = command(["adb", "logcat", "-d", "-b", "crash"], required=False).stdout
+                (out / "crash-log.txt").write_text(crash)
+                result["crashLog"] = crash[-15000:]
+                command(["adb", "shell", "uiautomator", "dump", "/sdcard/tidewater-ui.xml"], required=False)
+                hierarchy = command(["adb", "shell", "cat", "/sdcard/tidewater-ui.xml"], required=False).stdout
+                (out / "window.xml").write_text(hierarchy)
+                result["screenText"] = re.findall(r'text="([^"]*)"', hierarchy)
+                result["appLogs"] = command(["adb", "logcat", "-d", "-s", "Tidewater:D", "AndroidRuntime:E", "chromium:E"], required=False).stdout[-24000:]
+                (out / "app-log.txt").write_text(result["appLogs"])
+                if not result["processAlive"]:
+                    raise RuntimeError("App process exited after launch.")
+            finally:
+                shot = subprocess.run(["adb", "exec-out", "screencap", "-p"], capture_output=True, timeout=30)
+                if shot.returncode == 0 and shot.stdout.startswith(b"\x89PNG"):
+                    (out / "screen.png").write_bytes(shot.stdout)
+                    encoded = base64.b64encode(shot.stdout).decode()
+                    print("SCREENSHOT_LENGTH " + str(len(encoded)), flush=True)
+                    for i in range(0, len(encoded), 2500):
+                        print("SCREENSHOT_CHUNK " + str(i // 2500) + " " + encoded[i:i+2500], flush=True)
+                (out / "install-result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
+                print("INSTALL_RESULT_JSON " + json.dumps(result, ensure_ascii=False), flush=True)
+            PY
+      - name: Save emulator diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-16-install-diagnostics
+          path: install-diagnostics/
+          if-no-files-found: ignore
+          retention-days: 7
