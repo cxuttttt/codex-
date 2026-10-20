@@ -1,0 +1,27 @@
+name: Deliver verified APK
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/deliver-apk.yml'
+      - 'scripts/publish-apk.py'
+  workflow_dispatch:
+permissions:
+  contents: write
+  actions: read
+jobs:
+  deliver:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: tidewater-android-verification
+          path: deliverables
+          run-id: 39469729347
+          github-token: ${{ github.token }}
+      - name: Verify exact APK and provide a direct download
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/publish-apk.py
