@@ -43,7 +43,8 @@ except urllib.error.HTTPError as error:
         'name': 'Tidewater Android ' + version + ' — mobile GPU binding fix',
         'body': 'Fixes unused module resources incorrectly consuming per-stage texture bindings. '
                 'The original failure is reproduced and the fixed complete game is tested with an actual WebGPU device '
-                'limited to 16 sampled textures per shader stage. Original scene assets and visual effects are preserved. '
+                'limited to 16 sampled textures per shader stage. Original scene assets and gameplay are preserved. '
+                'The portable water profile simplifies reflection and refraction for the mobile texture budget. '
                 'The APK also passes Android 16 emulator installation and native launch checks. '
                 'The emulator WebView GPU and the user phone GPU differ; physical-device performance remains unverified.\n\n'
                 'Commit: ' + os.environ['GITHUB_SHA'] + '\nSHA256: ' + digest,

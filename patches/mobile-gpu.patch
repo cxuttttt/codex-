@@ -281,6 +281,68 @@ index 40fb45a..9d8c542 100644
  
  		} );
  
+diff --git a/src/ocean/UnderwaterLighting.js b/src/ocean/UnderwaterLighting.js
+index 48271e0..5265616 100644
+--- a/src/ocean/UnderwaterLighting.js
++++ b/src/ocean/UnderwaterLighting.js
+@@ -122,15 +122,19 @@ ${ T ? '	h *= smoothstep( 0.0, 3.0, frame.seaLevel - terrainHeightAt( xz ) );' :
+ 
+ 	};
+ 	const origins = [ mapParams.fields.origin0, mapParams.fields.origin1 ];
+-	const make = ( name ) => new Texture( { label: name, width: MAP_N, height: MAP_N, format: 'rgba16float', usage: [ 'sample', 'storage' ] } );
++	// Four independently written layers keep the lighting data and filtering intact
++	// while using one sampled-texture binding in scene materials.
++	const maps = new Texture( { label: 'underwaterLightMaps', width: MAP_N, height: MAP_N,
++		depth: 4, dimension: '2d-array', format: 'rgba16float', usage: [ 'sample', 'storage' ] } );
+ 	const levels = MAP_EXTENTS.map( ( extent, l ) => {
+ 
+ 		const texel = extent / MAP_N;
+-		const A = make( 'uwWaves' + l ), B = make( 'uwLevel' + l );
++		const output = ( layer ) => ( { storageTexture: maps, access: 'write',
++			view: { dimension: '2d', baseArrayLayer: layer, arrayLayerCount: 1 } } );
+ 		const kernel = new ComputeKernel( {
+ 			label: 'Underwater Light Map ' + l,
+ 			modules: [ helpers, ...( caustics && caustics.module ? [ caustics.module ] : [] ) ],
+-			bindings: { uwMapParams: { uniform: mapParams }, uwOutA: { storageTexture: A, access: 'write' }, uwOutB: { storageTexture: B, access: 'write' } },
++			bindings: { uwMapParams: { uniform: mapParams }, uwOutA: output( l * 2 ), uwOutB: output( l * 2 + 1 ) },
+ 			workgroupSize: [ 8, 8, 1 ],
+ 			code: /* wgsl */`
+ @compute @workgroup_size( WG_X, WG_Y, WG_Z )
+@@ -143,7 +147,7 @@ fn main( @builtin( global_invocation_id ) gid: vec3u ) {
+ }
+ `,
+ 		} );
+-		return { extent, texel, A, B, kernel, origin: origins[ l ] };
++		return { extent, texel, maps, layerA: l * 2, layerB: l * 2 + 1, kernel, origin: origins[ l ] };
+ 
+ 	} );
+ 
+@@ -153,7 +157,7 @@ fn main( @builtin( global_invocation_id ) gid: vec3u ) {
+ 		deps: [ commonModule ],
+ 		uniforms: mapParams,
+ 		uniformName: 'uwMapParams',
+-		bindings: { uwWaves0: { texture: L0.A }, uwLevel0: { texture: L0.B }, uwWaves1: { texture: L1.A }, uwLevel1: { texture: L1.B } },
++		bindings: { uwMaps: { texture: maps } },
+ 		code: /* wgsl */`
+ struct UwMapSample { height: f32, slope: vec2f, foam: f32, mean: f32, detailK: f32 };
+ 
+@@ -180,12 +184,12 @@ fn _uwMapLookup( xz: vec2f, waves: bool ) -> UwMapSample {
+ 	let st1 = ( xz - uwMapParams.origin1 ) / ${ L1.texel };
+ 	if ( all( st0 > vec2f( 0.5 ) ) && all( st0 < vec2f( ${ MAP_N }.0 - 0.5 ) ) ) {
+ 		let uv = st0 / ${ MAP_N }.0;
+-		if ( waves ) { a = textureSampleLevel( uwWaves0, smpLinearClamp, uv, 0.0 ); }
+-		b = textureSampleLevel( uwLevel0, smpLinearClamp, uv, 0.0 );
++		if ( waves ) { a = textureSampleLevel( uwMaps, smpLinearClamp, uv, 0, 0.0 ); }
++		b = textureSampleLevel( uwMaps, smpLinearClamp, uv, 1, 0.0 );
+ 	} else if ( all( st1 > vec2f( 0.5 ) ) && all( st1 < vec2f( ${ MAP_N }.0 - 0.5 ) ) ) {
+ 		let uv = st1 / ${ MAP_N }.0;
+-		if ( waves ) { a = textureSampleLevel( uwWaves1, smpLinearClamp, uv, 0.0 ); }
+-		b = textureSampleLevel( uwLevel1, smpLinearClamp, uv, 0.0 );
++		if ( waves ) { a = textureSampleLevel( uwMaps, smpLinearClamp, uv, 2, 0.0 ); }
++		b = textureSampleLevel( uwMaps, smpLinearClamp, uv, 3, 0.0 );
+ 	}
+ 	return UwMapSample( frame.seaLevel + a.x, a.yz, a.w, frame.seaLevel + b.x, b.y );
+ }
 diff --git a/src/ocean/WakeSim.js b/src/ocean/WakeSim.js
 index 6eb8b5d..c48c169 100644
 --- a/src/ocean/WakeSim.js
@@ -343,3 +405,182 @@ index 6eb8b5d..c48c169 100644
  			this.rowKernel.dispatch( N, { pass } );
  			this.colKernel.dispatch( N, { pass } );
  			this.invKernel.dispatch( N, { pass } );
+diff --git a/src/ocean/WaterMaterial.js b/src/ocean/WaterMaterial.js
+index cfdb390..110a474 100644
+--- a/src/ocean/WaterMaterial.js
++++ b/src/ocean/WaterMaterial.js
+@@ -1,4 +1,4 @@
+-import { Material, ShaderModule, G } from '../engine/webgpu.js';
++import { Material, ShaderModule, G, GPU } from '../engine/webgpu.js';
+ import { commonModule } from '../engine/render/wgsl/common.js';
+ import { whaleWaterModule } from './WhaleWater.js';
+ import { REFRACTION_GUARD } from './RefractionPass.js';
+@@ -191,13 +191,72 @@ export class WaterMaterial extends Material {
+ 	o.vShoreFoam = r.shoreFoam;
+ 	o.vSurfMask = r.surfMask;
+ `;
+-		this.output = this.cheap ? 'r.color = vec4f( 0.02, 0.05, 0.1, 1.0 ); r.mask = vec4f( 0.0, 1.0, 0.0, 1.0 );' : this._shadeWGSL( { T, SH, SIM, SF, CL, HULL, REFL } );
++		this.mobileProfile = ( GPU.limits?.maxSampledTexturesPerShaderStage ?? 16 ) <= 16;
++		this.output = this.cheap ? 'r.color = vec4f( 0.02, 0.05, 0.1, 1.0 ); r.mask = vec4f( 0.0, 1.0, 0.0, 1.0 );'
++			: this.mobileProfile ? this._shadeMobileWGSL( { SIM } ) : this._shadeWGSL( { T, SH, SIM, SF, CL, HULL, REFL } );
+ 		this.needsUpdate = true;
+ 
+ 	}
+ 
+ 	// --------------------------------------------------------------- shading (WGSL output snippet)
+ 
++	// Portable water retains the original displaced surface, wakes and foam. A single
++	// opaque-scene lookup replaces the desktop refraction pass and reflection ray march;
++	// the sky reflection uses the current sky irradiance and horizon colour.
++	_shadeMobileWGSL( { SIM } ) {
++
++		const camWaterH = this.cameraWaterHeightNode ? String( this.cameraWaterHeightNode ) : 'frame.cameraWaterHeight';
++		return /* wgsl */`
++	let pos = in.P;
++	let screenUV = in.pixel * frame.invResolution;
++	if ( in.vs.vSeaDepth < -0.15 ) { discard; }
++#if WATER_HULL
++	if ( mat.hullActive > 0.5 && in.front ) {
++		let mSize = vec2f( textureDimensions( waterHullMask ) );
++		let hullDist = textureLoad( waterHullMask, vec2i( clamp( screenUV, vec2f( 0.0 ), vec2f( 0.9999 ) ) * mSize ), 0 ).x;
++		if ( hullDist > 0.01 && length( pos - frame.cameraPos ) > hullDist - 0.02 ) { discard; }
++	}
++#endif
++	let footprint = max( length( fwidth( in.vs.vLagXZ ) ), 1e-4 );
++	let simState = ${ SIM ? 'shoreSimSample( pos.xz )' : 'vec4f( 0.0 )' };
++	let surf = waterSurfaceFragment( in.vs.vLagXZ, footprint, in.vs.vSeaDepth, in.vs.vFoam,
++		in.vs.vShoreN, in.vs.vShoreFoam, simState.x, simState, in.vs.vSurfMask, pos );
++	let whale = whaleWater( pos.xz );
++	let foam = sat( max( surf.foam, whale.x ) * mat.foamIntensity );
++	let V = normalize( frame.cameraPos - pos );
++	let below = frame.cameraPos.y < ${ camWaterH };
++	let Nup = normalize( mix( surf.normal, vec3f( 0.0, 1.0, 0.0 ), whale.y * 0.75 ) );
++	let Nside = select( Nup, - Nup, below );
++	let N = normalize( Nside + V * max( - dot( Nside, V ) + 0.03, 0.0 ) );
++	let fresnel = fresnelDielectric( max( dot( N, V ), 1e-4 ), ${ IOR } );
++	let surfaceZ = - ( frame.view * vec4f( pos, 1.0 ) ).z;
++	let offset = N.xz * mat.refraction * min( max( in.vs.vSeaDepth, 0.0 ) * 0.04, 0.25 );
++	var uv = clamp( screenUV + offset, vec2f( 0.001 ), vec2f( 0.999 ) );
++	if ( viewDepth( _waterSceneDepthAt( uv ) ) < surfaceZ + 0.05 ) { uv = screenUV; }
++	let distance = clamp( viewDepth( _waterSceneDepthAt( uv ) ) - surfaceZ, 0.0, 80.0 );
++	let transmission = exp( - ( frame.waterAbsorption + frame.waterScattering ) * distance );
++	let background = textureSampleLevel( waterSceneColor, smpLinearClamp, uv, 0.0 ).rgb;
++	let light = frame.sunColor * sunShadowPCF( pos, vec3f( 0.0, 1.0, 0.0 ), in.pixel );
++	let scattering = vec3f( 0.035, 0.24, 0.30 ) * ( frame.skyIrradiance + light * 0.12 );
++	let underColor = background * transmission + scattering * ( vec3f( 1.0 ) - transmission );
++	let reflectionDirection = reflect( - V, N );
++	let skyColor = mix( frame.horizonColor * 0.6, frame.skyIrradiance * 1.1, sat( reflectionDirection.y ) );
++	var color = mix( underColor, skyColor * mat.reflectionStrength, fresnel );
++	let H = normalize( frame.sunDir + V + vec3f( 0.0, 1e-5, 0.0 ) );
++	let rough = clamp( mat.waterRoughness + foam * 0.2 + surf.aeration * 0.05, 0.025, 0.65 );
++	let a2 = rough * rough;
++	let NdL = max( dot( N, frame.sunDir ), 0.0 );
++	let NdV = max( dot( N, V ), 1e-4 );
++	color += light * ( _waterDGGX( max( dot( N, H ), 0.0 ), a2 )
++		* _waterVSmithGGX( NdL, NdV, a2 ) * NdL * 0.02 );
++	let foamColor = vec3f( 0.94, 0.98, 1.0 ) * ( frame.skyIrradiance * 0.8 + light * ( NdL * 0.6 + 0.08 ) );
++	color = mix( color, foamColor, foam );
++	r.color = vec4f( clamp( color, vec3f( 0.0 ), vec3f( 128.0 ) ), 1.0 );
++	r.mask = vec4f( select( 0.0, 1.0, below ), 1.0, 0.0, 1.0 );
++`;
++
++	}
++
+ 	_shadeWGSL( { T, SH, SIM, SF, CL, HULL, REFL } ) {
+ 
+ 		const S = this.waterSurface;
+diff --git a/src/world/TerrainGPU.js b/src/world/TerrainGPU.js
+index a2fc4c0..15f5ddf 100644
+--- a/src/world/TerrainGPU.js
++++ b/src/world/TerrainGPU.js
+@@ -15,9 +15,8 @@ import { detailBinding } from './terrain/TerrainShading.js';
+ //
+ // Textures (all over the terrain domain unless noted):
+ //   heightTexture  R32F   exact heights, bilinear filtering done manually (heightAt)
+-//   normalTexture  RGBA8  macro normal xz (encoded), rock mask, baked ambient occlusion (mipmapped)
+-//   splatTexture   RGBA8  loose sand, worn ground / paths, gullies (land) or seagrass (seabed),
+-//                         seabed rubble / the eroded beach scarp face on land (mipmapped)
++//   surfaceTexture RGBA8 array, layer 0: macro normal xz, rock mask, ambient occlusion;
++//                         layer 1: sand, worn ground, gullies / seagrass, rubble (mipmapped)
+ //   detailTexture  RGBA8  512^2 tileable detail heights (rock, soil, sand, fbm), see DetailTextures
+ //   shadowHeightTexture R16F 512^2 (4 m) heights with max-mips (input of the sun shadow bake)
+ //   sunShadowTexture    RGBA16F storage 512^2: 'shadow top' height and occluder distance toward the
+@@ -34,7 +33,7 @@ import { detailBinding } from './terrain/TerrainShading.js';
+ //   terrainShoreSample( xz: vec2f ) -> vec4f            shore field (T, dirX, dirZ, exposure), bilinear
+ //   terrainSunShadowAt( P: vec3f ) -> f32               heightfield sun shadow: 0 in the hills' shadow .. 1 lit
+ // Bindings: terrainParams (TerrainParams: origin, size, res, shoreRes, sunBake, sunBaked), terrainHeightTex,
+-// terrainNormalTex, terrainSplatTex, terrainDetailTex (tileable: sample with smpLinearRepeat / smpAnisoRepeat),
++// terrainSurfaceTex, terrainDetailTex (tileable: sample with smpLinearRepeat / smpAnisoRepeat),
+ // terrainShoreTex, terrainSunShadowTex.
+ const SUN_N = 512;
+ const SUN_T0 = 24; // m: nearer occluders are left to the shadow map / N.L
+@@ -51,6 +50,21 @@ function dataTexture( data, width, height, format, label, mips = false ) {
+ 
+ }
+ 
++// These two maps have identical sizes, formats and filtering. Array layers retain
++// their texels and independent mip chains while consuming one sampled-texture slot.
++export function createTerrainSurfaceTexture( normal, splat, res ) {
++
++	const data = new Uint8Array( normal.length + splat.length );
++	data.set( normal );
++	data.set( splat, normal.length );
++	const texture = new Texture( { label: 'terrainSurface', width: res, height: res, depth: 2,
++		dimension: '2d-array', format: 'rgba8unorm', mips: true, data } );
++	texture.getGPU();
++	generateMipmaps( texture );
++	return texture;
++
++}
++
+ export class TerrainGPU {
+ 
+ 	constructor( terrain, shoreField ) {
+@@ -64,8 +78,7 @@ export class TerrainGPU {
+ 
+ 		const maps = bakeTerrainMaps( terrain );
+ 		// trilinear, clamp to edge (smpLinearClamp), linear data (no colour space)
+-		this.normalTexture = dataTexture( maps.normal, res, res, 'rgba8unorm', 'terrainNormalRockAO', true );
+-		this.splatTexture = dataTexture( maps.splat, res, res, 'rgba8unorm', 'terrainSplat', true );
++		this.surfaceTexture = createTerrainSurfaceTexture( maps.normal, maps.splat, res );
+ 		this.detailTexture = getDetailTexture();
+ 
+ 		// coarse heights for the sun shadow march (half float is filterable everywhere)
+@@ -104,8 +117,7 @@ export class TerrainGPU {
+ 			uniforms: this.uniforms,
+ 			bindings: {
+ 				terrainHeightTex: { texture: this.heightTexture, sampleType: 'unfilterable-float' },
+-				terrainNormalTex: { texture: this.normalTexture },
+-				terrainSplatTex: { texture: this.splatTexture },
++				terrainSurfaceTex: { texture: this.surfaceTexture },
+ 				terrainDetailTex: detailBinding(),
+ 				terrainShoreTex: { texture: () => this.shoreTexture, sampleType: 'unfilterable-float' },
+ 				terrainSunShadowTex: { texture: this.sunShadowTexture },
+@@ -242,12 +254,12 @@ fn terrainHeightAt( xz: vec2f ) -> f32 {
+ 
+ // filtered normal (xz components), rock mask, ambient occlusion
+ fn terrainNormalRock( xz: vec2f ) -> vec4f {
+-	let s = textureSample( terrainNormalTex, smpLinearClamp, terrainUvOf( xz ) );
++	let s = textureSample( terrainSurfaceTex, smpLinearClamp, terrainUvOf( xz ), 0 );
+ 	return vec4f( s.xy * 2.0 - 1.0, s.z, s.w );
+ }
+ // explicit mip (e.g. in the vertex stage)
+ fn terrainNormalRockLevel( xz: vec2f, level: f32 ) -> vec4f {
+-	let s = textureSampleLevel( terrainNormalTex, smpLinearClamp, terrainUvOf( xz ), level );
++	let s = textureSampleLevel( terrainSurfaceTex, smpLinearClamp, terrainUvOf( xz ), 0, level );
+ 	return vec4f( s.xy * 2.0 - 1.0, s.z, s.w );
+ }
+ fn terrainNormalAt( xz: vec2f ) -> vec3f {
+@@ -258,10 +270,10 @@ fn terrainNormalAt( xz: vec2f ) -> vec3f {
+ // loose sand, worn ground / paths, gullies (land) or seagrass (seabed), seabed rubble (the
+ // eroded beach scarp face on land)
+ fn terrainSplat( xz: vec2f ) -> vec4f {
+-	return textureSample( terrainSplatTex, smpLinearClamp, terrainUvOf( xz ) );
++	return textureSample( terrainSurfaceTex, smpLinearClamp, terrainUvOf( xz ), 1 );
+ }
+ fn terrainSplatLevel( xz: vec2f, level: f32 ) -> vec4f {
+-	return textureSampleLevel( terrainSplatTex, smpLinearClamp, terrainUvOf( xz ), level );
++	return textureSampleLevel( terrainSurfaceTex, smpLinearClamp, terrainUvOf( xz ), 1, level );
+ }
+ 
+ // shore field: (T, dirX, dirZ, exposure), bilinear via loads (float32 data)

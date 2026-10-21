@@ -59,6 +59,7 @@ export function reportObject() {
     ready: !!window.__tideReady,
     renderedFrames: app?.engine?.frame || 0,
     renderScale: app?.settings?.renderScale,
+    waterProfile: app?.waterMaterial?.mobileProfile ? 'mobile-compatible' : 'standard',
     renderSize: app?.sceneRenderer ? [app.sceneRenderer.width, app.sceneRenderer.height] : null,
     foregroundSampleSeconds: samples.reduce((n, x) => n + x.seconds, 0),
     averageFps: samples.length ? samples.reduce((n, x) => n + x.frames, 0) / samples.reduce((n, x) => n + x.seconds, 0) : null,
