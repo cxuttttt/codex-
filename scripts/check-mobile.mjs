@@ -9,4 +9,5 @@ function run(cmd, args, cwd = root) {
 }
 for (const name of readdirSync('mobile').filter(x => x.endsWith('.js'))) run(process.execPath, ['--check', 'mobile/' + name]);
 run(process.execPath, ['--test', 'tests/input.test.mjs']);
+run(process.execPath, ['--test', 'tests/shader-bindings.test.mjs']);
 run(process.execPath, ['test/game-logic.mjs'], resolve('upstream'));

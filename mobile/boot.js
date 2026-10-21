@@ -1,5 +1,5 @@
 const report = {
-  version: '0.1.0',
+  version: '0.1.1',
   upstreamCommit: '4811ba48d795197de5621985f404e765c0b7c0ef',
   startedAt: new Date().toISOString(),
   stage: '检查运行环境',

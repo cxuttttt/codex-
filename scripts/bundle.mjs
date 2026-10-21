@@ -33,8 +33,9 @@ scan(sourcePublic);
 const html = readFileSync(join(dest, 'index.html'), 'utf8');
 if (/https?:\/\/fonts\.(googleapis|gstatic)\.com/.test(html)) throw new Error('Remote fonts remain in HTML.');
 const config = JSON.parse(readFileSync('upstream.json', 'utf8'));
+const version = JSON.parse(readFileSync('package.json', 'utf8')).version;
 writeFileSync('build-report.json', JSON.stringify({
-  upstream: config, createdAt: new Date().toISOString(), upstreamPublicFileCount: manifest.length,
+  version, upstream: config, createdAt: new Date().toISOString(), upstreamPublicFileCount: manifest.length,
   upstreamPublicBytes: manifest.reduce((n, x) => n + x.size, 0), completeOriginalAssetsVerified: true,
   networkPermissionRequested: false, minimumAndroidApi: 31, mobileTests: 'see workflow checks',
   physicalDeviceTested: false, assets: manifest

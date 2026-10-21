@@ -34,6 +34,8 @@ patch(main, "ui.setLoadingError( 'Something went wrong: ' + e.message );",
 patch('upstream/src/engine/gpu/GPU.js',
   "device.lost.then( ( info ) => console.error( 'WebGPU device lost:', info.message ) );",
   "device.lost.then( ( info ) => { console.error( 'WebGPU device lost:', info.message ); if ( typeof window !== 'undefined' ) window.dispatchEvent( new CustomEvent( 'tidewater:gpu-lost', { detail: info.message } ) ); } );");
+run('git', ['apply', '--check', resolve('patches/mobile-gpu.patch')], resolve('upstream'));
+run('git', ['apply', resolve('patches/mobile-gpu.patch')], resolve('upstream'));
 let html = readFileSync('upstream/index.html', 'utf8');
 html = html.replace(/^\s*<link[^>]*https:\/\/fonts\.(?:googleapis|gstatic)\.com[^>]*>\s*$/gm, '');
 html = html.replace('width=device-width, initial-scale=1', 'width=device-width, initial-scale=1, viewport-fit=cover');

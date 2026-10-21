@@ -1,0 +1,106 @@
+diff --git a/src/engine/gpu/Shader.js b/src/engine/gpu/Shader.js
+index 1709aaf..50f64ab 100644
+--- a/src/engine/gpu/Shader.js
++++ b/src/engine/gpu/Shader.js
+@@ -335,6 +335,9 @@ export class BindingSet {
+ 
+ 			const l = this.described[ i ].layout;
+ 			const st = stageOf[ this.names[ i ] ];
++			// Keep the declaration and resource binding for unused module helpers, but do
++			// not charge a stage's descriptor budget for a resource it never accesses.
++			if ( st === 'unused' ) l.visibility = 0;
+ 			if ( st === 'fragment' && ( l.visibility & GPUShaderStage.FRAGMENT ) ) l.visibility = GPUShaderStage.FRAGMENT;
+ 			if ( st === 'vertex' && ( l.visibility & GPUShaderStage.VERTEX ) ) l.visibility = GPUShaderStage.VERTEX;
+ 
+@@ -530,19 +533,33 @@ export function composeShader( { modules = [], bindings = {}, code = '', defines
+ 	for ( const k in bindings ) specs[ k ] = bindings[ k ];
+ 	let stageOf = null;
+ 	let demote = null;
++	let all = header;
++	for ( const m of mods ) all += m.code + '\n';
++	const full = preprocess( all + code, defines );
++	if ( stage === 'compute' ) {
++
++		const entries = [ ...stripWGSLComments( full ).matchAll( /@compute\b[^{};]*?\bfn\s+([A-Za-z_]\w*)\s*\(/g ) ];
++		if ( entries.length ) {
++
++			const used = new Set();
++			for ( const entry of entries ) for ( const id of reachableIdentifiers( full, entry[ 1 ] ) ) used.add( id );
++			stageOf = {};
++			for ( const k in specs ) if ( ! used.has( k ) ) stageOf[ k ] = 'unused';
++
++		}
++
++	}
+ 	if ( stage === 'render' && /@vertex\s+fn\s+vs\b/.test( code ) ) {
+ 
+ 		// bindings only one entry point can reach are declared for that stage only (per-stage limits:
+ 		// 12 uniform buffers, 16 sampled textures on some adapters)
+-		let all = '';
+-		for ( const m of mods ) all += m.code + '\n';
+-		const full = preprocess( all + code, defines );
+ 		const usedV = reachableIdentifiers( full, 'vs' );
+ 		const usedF = /@fragment\s+fn\s+fs\b/.test( full ) ? reachableIdentifiers( full, 'fs' ) : null;
+ 		stageOf = {};
+ 		for ( const k in specs ) {
+ 
+-			if ( ! usedV.has( k ) && ( ! usedF || usedF.has( k ) ) ) stageOf[ k ] = 'fragment';
++			if ( ! usedV.has( k ) && ( ! usedF || ! usedF.has( k ) ) ) stageOf[ k ] = 'unused';
++			else if ( ! usedV.has( k ) && ( ! usedF || usedF.has( k ) ) ) stageOf[ k ] = 'fragment';
+ 			else if ( usedF && ! usedF.has( k ) && usedV.has( k ) ) stageOf[ k ] = 'vertex';
+ 
+ 		}
+@@ -597,6 +614,7 @@ export function composeShader( { modules = [], bindings = {}, code = '', defines
+ // Identifiers reachable from function `entry` through the call graph of the top-level functions.
+ export function reachableIdentifiers( code, entry ) {
+ 
++	code = stripWGSLComments( code );
+ 	const fns = new Map();
+ 	const re = /\bfn\s+([A-Za-z_]\w*)\s*\(/g;
+ 	let m;
+@@ -641,6 +659,45 @@ export function reachableIdentifiers( code, entry ) {
+ 
+ }
+ 
++// WGSL permits nested block comments. Preserve source positions and newlines so
++// braces and function names mentioned in comments cannot corrupt reachability.
++function stripWGSLComments( code ) {
++
++	let depth = 0, line = false, out = '';
++	for ( let i = 0; i < code.length; i ++ ) {
++
++		const c = code[ i ], next = code[ i + 1 ];
++		if ( line ) {
++
++			if ( c === '\n' ) line = false;
++			out += c === '\n' ? '\n' : ' ';
++
++		} else if ( c === '/' && next === '*' ) {
++
++			depth ++;
++			out += '  ';
++			i ++;
++
++		} else if ( depth && c === '*' && next === '/' ) {
++
++			depth --;
++			out += '  ';
++			i ++;
++
++		} else if ( depth ) out += c === '\n' ? '\n' : ' ';
++		else if ( c === '/' && next === '/' ) {
++
++			line = true;
++			out += '  ';
++			i ++;
++
++		} else out += c;
++
++	}
++	return out;
++
++}
++
+ function sameSpec( a, b ) {
+ 
+ 	const ka = Object.keys( a ), kb = Object.keys( b );
