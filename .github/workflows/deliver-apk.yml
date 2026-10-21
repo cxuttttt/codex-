@@ -57,7 +57,7 @@ jobs:
             console.log(adb('root'));
             adb('wait-for-device');
             adb('shell', 'wm', 'size', '720x1280');
-            writeFileSync('/tmp/webview-command-line', '_ --enable-unsafe-webgpu --ignore-gpu-blocklist --enable-features=Vulkan --use-vulkan=native --disable-gpu-watchdog\n');
+            writeFileSync('/tmp/webview-command-line', '_ --enable-unsafe-webgpu --ignore-gpu-blocklist --disable-gpu-watchdog\n');
             adb('push', '/tmp/webview-command-line', '/data/local/tmp/webview-command-line');
             adb('shell', 'chmod', '644', '/data/local/tmp/webview-command-line');
             writeFileSync(out + '/webview-provider.txt', adb('shell', 'dumpsys', 'webviewupdate'));
