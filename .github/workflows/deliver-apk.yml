@@ -1,103 +1,158 @@
-name: Validate and deliver mobile GPU fix
+name: Inspect actual APK in Android emulator
 on:
   push:
     branches: [main]
     paths: ['.github/workflows/deliver-apk.yml']
   workflow_dispatch:
 permissions:
-  contents: write
+  contents: read
   actions: read
 jobs:
-  validate-and-deliver:
+  actual-apk-render:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    env:
-      TIDEWATER_PLAYWRIGHT_MODULE: /tmp/tidewater-test-runtime/node_modules/playwright
-      TIDEWATER_GPU_OUTPUT: gpu-diagnostics
-      DEBUG: pw:browser
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: 881ed80acf4773af2800bf93268d1a2eb3751072
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
       - uses: actions/download-artifact@v4
         with:
           name: tidewater-android-verification
           path: deliverables
-          run-id: 39625809050
+          run-id: 39629595955
           github-token: ${{ github.token }}
-      - uses: actions/download-artifact@v4
+      - name: Verify exact APK under test
+        run: |
+          python3 - <<'PYCODE'
+          import pathlib,hashlib
+          data=pathlib.Path('deliverables/Tidewater.apk').read_bytes()
+          assert len(data)==53314773
+          assert hashlib.sha256(data).hexdigest()=='4c0232534101aeaae055777e69b9b8ae18944e34e3f821ac56c32ecc0458b2dc'
+          PYCODE
+      - name: Prepare actual WebView inspection script
+        run: |
+          cat > /tmp/tidewater-emulator-render.mjs <<'NODECODE'
+          import assert from 'node:assert/strict';
+          import { spawnSync } from 'node:child_process';
+          import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+          import { setTimeout as delay } from 'node:timers/promises';
+          const out = 'emulator-render-evidence';
+          mkdirSync(out, { recursive: true });
+          const pkg = 'dev.sencao.tidewater.verification';
+          const adb = (...args) => {
+            const r = spawnSync('adb', args, { encoding: 'utf8', timeout: 120000 });
+            assert.equal(r.status, 0, 'adb ' + args.join(' ') + ': ' + r.stderr);
+            return r.stdout;
+          };
+          let ws, state, failure;
+          try {
+            console.log(adb('root'));
+            adb('wait-for-device');
+            adb('shell', 'wm', 'size', '720x1280');
+            writeFileSync('/tmp/webview-command-line', '_ --enable-unsafe-webgpu --ignore-gpu-blocklist --enable-features=Vulkan --use-vulkan=native --disable-gpu-watchdog\n');
+            adb('push', '/tmp/webview-command-line', '/data/local/tmp/webview-command-line');
+            adb('shell', 'chmod', '644', '/data/local/tmp/webview-command-line');
+            writeFileSync(out + '/webview-provider.txt', adb('shell', 'dumpsys', 'webviewupdate'));
+            adb('install', '-r', 'deliverables/Tidewater.apk');
+            adb('shell', 'am', 'force-stop', pkg);
+            adb('logcat', '-c');
+            console.log(adb('shell', 'am', 'start', '-W', '-n', pkg + '/dev.sencao.tidewater.MainActivity'));
+            let socket;
+            for (let i = 0; i < 45 && !socket; i++) {
+              socket = adb('shell', 'cat', '/proc/net/unix').match(/webview_devtools_remote_\d+/)?.[0];
+              if (!socket) await delay(1000);
+            }
+            assert.ok(socket, 'WebView debugging socket must exist');
+            adb('forward', 'tcp:9222', 'localabstract:' + socket);
+            let target;
+            for (let i = 0; i < 45 && !target; i++) {
+              try { target = (await (await fetch('http://127.0.0.1:9222/json/list')).json()).find(t => t.url.includes('appassets.androidplatform.net')); } catch (_) {}
+              if (!target) await delay(1000);
+            }
+            assert.ok(target, 'Actual APK WebView page must be exposed');
+            ws = new WebSocket(target.webSocketDebuggerUrl);
+            await new Promise((resolve, reject) => { ws.addEventListener('open', resolve, { once: true }); ws.addEventListener('error', reject, { once: true }); });
+            let id = 0;
+            const pending = new Map();
+            ws.addEventListener('message', e => {
+              const m = JSON.parse(e.data);
+              if (pending.has(m.id)) { const p = pending.get(m.id); pending.delete(m.id); clearTimeout(p.timer); m.error ? p.reject(new Error(JSON.stringify(m.error))) : p.resolve(m.result); }
+            });
+            function cdp(method, params = {}) {
+              return new Promise((resolve, reject) => {
+                const n = ++id;
+                const timer = setTimeout(() => { pending.delete(n); reject(new Error('CDP timeout: ' + method)); }, 120000);
+                pending.set(n, { resolve, reject, timer }); ws.send(JSON.stringify({ id: n, method, params }));
+              });
+            }
+            async function evaluate(expression) {
+              const r = await cdp('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
+              if (r.exceptionDetails) throw new Error(JSON.stringify(r.exceptionDetails));
+              return r.result.value;
+            }
+            await cdp('Runtime.enable');
+            await cdp('Page.enable');
+            await cdp('Page.navigate', { url: 'https://appassets.androidplatform.net/assets/game/index.html?mobile=1&scale=0.5' });
+            await delay(3000);
+            const read = () => evaluate('({ report: window.__TIDE_REPORT__?.(), body: document.body.innerText.slice(-4000) })');
+            for (let i = 0; i < 900; i++) {
+              try { state = await read(); } catch (_) { await delay(1000); continue; }
+              if (i % 15 === 0) console.log(JSON.stringify({ elapsedSeconds: i, stage: state.report?.stage, ready: state.report?.ready, frames: state.report?.renderedFrames }));
+              if (state.report?.ready || state.report?.stage === '运行失败') break;
+              await delay(1000);
+            }
+            assert.equal(state?.report?.ready, true, JSON.stringify(state));
+            const point = await evaluate('(() => { const r=window.__ui.startEl.getBoundingClientRect(); return { x:r.x+r.width/2,y:r.y+r.height/2 }; })()');
+            await cdp('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [point] });
+            await cdp('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+            for (let i = 0; i < 180; i++) {
+              state = await read();
+              if (state.report?.renderedFrames >= 3 || state.report?.stage === '运行失败') break;
+              await delay(1000);
+            }
+            await evaluate('window.__tideApp.gpu.queue.onSubmittedWorkDone().then(() => true)');
+            state = await read();
+            assert.ok(state.report.renderedFrames >= 3, 'Actual APK must render frames');
+            assert.equal(state.report.errors.length, 0, 'No GPU or game errors');
+            console.log('PASSED: actual APK starts and renders in the Android 16 emulator');
+          } catch (error) { failure = error; console.error(error.message); }
+          finally {
+            ws?.close();
+            writeFileSync(out + '/result.json', JSON.stringify({ state, error: failure?.message }, null, 2));
+            writeFileSync(out + '/logcat.txt', spawnSync('adb', ['logcat', '-d'], { encoding: 'utf8', timeout: 30000 }).stdout || '');
+            const shot = spawnSync('adb', ['exec-out', 'screencap', '-p'], { timeout: 30000 });
+            if (shot.status === 0) writeFileSync(out + '/screen.png', shot.stdout);
+          }
+          if (failure) process.exitCode = 1;
+          NODECODE
+      - name: Enable emulator acceleration
+        run: sudo chmod a+rw /dev/kvm
+      - name: Inspect the actual APK with emulator Vulkan enabled
+        uses: reactivecircus/android-emulator-runner@v2
         with:
-          name: android-16-installation
-          path: install-evidence
-          run-id: 39625809050
-          github-token: ${{ github.token }}
-      - name: Verify and extract the exact already-installed APK
-        run: |
-          python3 - <<'PY'
-          import hashlib, json, pathlib, zipfile
-          apk = pathlib.Path('deliverables/Tidewater.apk').read_bytes()
-          assert len(apk) == 53314613
-          assert hashlib.sha256(apk).hexdigest() == '521cff27875f93fd4c5e51e6d89d872f7167d2da495452b8ec4369448b927784'
-          report = json.loads(pathlib.Path('deliverables/build-report.json').read_text())
-          assert report['version'] == '0.1.1' and report['apkSignatureVerified']
-          assert report['allUpstreamAssetsVerifiedInsideApk']
-          installed = json.loads(pathlib.Path('install-evidence/installation.json').read_text())
-          assert 'Success' in installed['install'] and 'Status: ok' in installed['launch']
-          assert installed['pid'] and not installed['crashLog'].strip()
-          target = pathlib.Path('upstream/dist')
-          target.mkdir(parents=True, exist_ok=True)
-          import io
-          with zipfile.ZipFile(io.BytesIO(apk)) as archive:
-              for name in archive.namelist():
-                  if name.startswith('assets/game/') and not name.endswith('/'):
-                      relative = pathlib.PurePosixPath(name[len('assets/game/'):])
-                      assert not relative.is_absolute() and '..' not in relative.parts
-                      dest = target.joinpath(*relative.parts)
-                      dest.parent.mkdir(parents=True, exist_ok=True)
-                      dest.write_bytes(archive.read(name))
-          print('Exact APK and Android 16 installation proof verified; all test content comes from this APK.')
-          PY
-      - name: Install browser and Mesa software Vulkan
-        run: |
-          npm install --ignore-scripts --prefix /tmp/tidewater-test-runtime playwright@1.62.1
-          node /tmp/tidewater-test-runtime/node_modules/playwright/cli.js install --with-deps chromium
-          sudo apt-get install -y mesa-vulkan-drivers
-          python3 - <<'PY'
-          import glob, os, pathlib
-          candidates = glob.glob('/usr/share/vulkan/icd.d/*lvp*.json')
-          assert candidates, 'Mesa lavapipe Vulkan ICD is required'
-          runtime = pathlib.Path(os.environ['RUNNER_TEMP']) / 'tidewater-xdg'
-          runtime.mkdir(mode=0o700, exist_ok=True)
-          with open(os.environ['GITHUB_ENV'], 'a') as environment:
-              environment.write('VK_ICD_FILENAMES=' + candidates[0] + '\n')
-              environment.write('VK_DRIVER_FILES=' + candidates[0] + '\n')
-              environment.write('XDG_RUNTIME_DIR=' + str(runtime) + '\n')
-          script = pathlib.Path('tests/gpu-startup.mjs')
-          text = script.read_text()
-          assert text.count("'--use-angle=swiftshader'") == 1
-          text = text.replace("'--use-angle=swiftshader'", "'--use-angle=vulkan', '--use-vulkan=native', '--enable-features=Vulkan,VulkanFromANGLE,DefaultANGLEVulkan', '--disable-vulkan-surface', '--ignore-gpu-blocklist'")
-          script.write_text(text)
-          print('Using Mesa Vulkan:', candidates[0])
-          PY
-      - name: Run complete game from the actual APK with 16 sampled and 4 storage textures
-        run: node tests/gpu-startup.mjs
-      - name: Preserve actual APK rendering evidence
+          api-level: 36
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7
+          cores: 2
+          ram-size: 4096M
+          emulator-boot-timeout: 600
+          emulator-options: -no-window -gpu swiftshader -feature Vulkan -no-snapshot -noaudio -no-boot-anim -camera-back none -camera-front none
+          disable-animations: true
+          script: node /tmp/tidewater-emulator-render.mjs
+      - name: Save real WebView diagnostics and screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: actual-apk-vulkan-diagnostics
-          path: gpu-diagnostics/
+          name: actual-apk-android-16-rendering
+          path: emulator-render-evidence/
           if-no-files-found: ignore
           retention-days: 30
-      - name: Publish only after actual APK rendering passes
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          python3 - <<'PY'
-          import os, runpy
-          os.environ['GITHUB_SHA'] = '881ed80acf4773af2800bf93268d1a2eb3751072'
-          runpy.run_path('scripts/release-apk.py', run_name='__main__')
-          PY
