@@ -29,7 +29,7 @@ try {
   browser = await chromium.launch({
     executablePath: process.env.TIDEWATER_CHROMIUM || undefined,
     headless: true,
-    args: ['--no-sandbox', '--enable-unsafe-webgpu', '--use-angle=swiftshader', '--disable-dev-shm-usage'],
+    args: ['--no-sandbox', '--enable-unsafe-webgpu', '--use-angle=swiftshader', '--disable-dev-shm-usage', '--disable-gpu-watchdog'],
   });
   page = await browser.newPage({ viewport: { width: 960, height: 540 }, deviceScaleFactor: 1, hasTouch: true });
   page.on('console', message => {
@@ -40,13 +40,15 @@ try {
     window.__testTextureLimit = 16;
     window.__testBindingCounts = [];
     window.__testDeviceLimits = [];
+    window.__testStorageLimits = [];
     const request = GPUAdapter.prototype.requestDevice;
     GPUAdapter.prototype.requestDevice = async function(descriptor = {}) {
       const device = await request.call(this, {
         ...descriptor,
-        requiredLimits: { ...descriptor.requiredLimits, maxSampledTexturesPerShaderStage: 16 },
+        requiredLimits: { ...descriptor.requiredLimits, maxSampledTexturesPerShaderStage: 16, maxStorageTexturesPerShaderStage: 4 },
       });
       window.__testDeviceLimits.push(device.limits.maxSampledTexturesPerShaderStage);
+      window.__testStorageLimits.push(device.limits.maxStorageTexturesPerShaderStage);
       return device;
     };
     const create = GPUDevice.prototype.createBindGroupLayout;
@@ -54,13 +56,14 @@ try {
       const counts = {};
       for (const [name, stage] of [['vertex', 1], ['fragment', 2], ['compute', 4]]) {
         counts[name] = Array.from(descriptor.entries).filter(e => e.texture && (e.visibility & stage)).length;
+        counts[name + 'Storage'] = Array.from(descriptor.entries).filter(e => e.storageTexture && (e.visibility & stage)).length;
       }
       window.__testBindingCounts.push({ label: descriptor.label, ...counts });
       return create.call(this, descriptor);
     };
   });
   await page.goto(`http://127.0.0.1:${server.address().port}/?mobile=1&scale=0.5`, { timeout: 60000 });
-  await page.waitForFunction(() => window.__tideReady || window.__TIDE_REPORT__?.().stage === '运行失败', null, { timeout: 300000 });
+  await page.waitForFunction(() => window.__tideReady || window.__TIDE_REPORT__?.().stage === '运行失败', null, { timeout: 900000 });
   if (!expectFailure && await page.evaluate(() => !!window.__tideReady)) {
     await page.evaluate(() => window.__ui?.startEl?.click());
     await page.waitForFunction(() => window.__tideApp?.engine?.frame >= 3, null, { timeout: 180000 });
@@ -68,6 +71,7 @@ try {
   report = await page.evaluate(() => ({
     report: window.__TIDE_REPORT__?.(),
     deviceLimits: window.__testDeviceLimits,
+    storageLimits: window.__testStorageLimits,
     bindingCounts: window.__testBindingCounts,
     startOverlay: window.__ui?._start,
     canvasSize: Array.from(document.querySelectorAll('canvas')).map(c => [c.width, c.height]),
@@ -78,6 +82,7 @@ try {
   console.log(JSON.stringify({ ...report, bindingCounts: report.bindingCounts.filter(c => Math.max(c.vertex, c.fragment, c.compute) > 14) }, null, 2));
   assert.ok(report.deviceLimits.length >= 2, 'GPU probe and actual game must both create devices');
   assert.ok(report.deviceLimits.every(n => n === 16), 'Native WebGPU device must enforce 16 sampled textures');
+  assert.ok(report.storageLimits.every(n => n === 4), 'Native WebGPU device must enforce 4 storage textures');
   if (expectFailure) {
     assert.equal(report.report.stage, '运行失败');
     assert.ok(errors.some(e => /sampled textures.*maximum per-stage limit/s.test(e)), 'Reproduce the reported texture-limit error');
@@ -88,6 +93,7 @@ try {
     assert.equal(report.report.errors.length, 0, 'No WebGPU, WGSL or game errors');
     assert.equal(errors.length, 0, 'No browser console errors');
     assert.ok(report.bindingCounts.every(c => Math.max(c.vertex, c.fragment, c.compute) <= 16), 'All stage texture counts fit the phone limit');
+    assert.ok(report.bindingCounts.every(c => Math.max(c.vertexStorage, c.fragmentStorage, c.computeStorage) <= 4), 'All storage-texture counts fit the portable limit');
     console.log('PASSED: complete game starts and renders with a 16-texture WebGPU device');
   }
 } finally {

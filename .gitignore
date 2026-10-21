@@ -1,4 +1,7 @@
 upstream/
+deliverables/
+gpu-diagnostics/
+install-diagnostics/
 android/.gradle/
 android/local.properties
 android/**/build/

@@ -104,3 +104,102 @@ index 1709aaf..50f64ab 100644
  function sameSpec( a, b ) {
  
  	const ka = Object.keys( a ), kb = Object.keys( b );
+diff --git a/src/ocean/ComputeMips.js b/src/ocean/ComputeMips.js
+index 2b66b95..18dab75 100644
+--- a/src/ocean/ComputeMips.js
++++ b/src/ocean/ComputeMips.js
+@@ -1,4 +1,4 @@
+-import { ComputeKernel } from '../engine/webgpu.js';
++import { ComputeKernel, GPU } from '../engine/webgpu.js';
+ 
+ // Box-filtered mip chain of a square power-of-two 2d / 2d-array / cube texture in two compute
+ // dispatches, instead of a render pass per level and layer (generateMipmaps):
+@@ -17,6 +17,40 @@ export class ComputeMips {
+ 		this.res = res;
+ 		this.layers = tex.dimension === '3d' ? 1 : tex.depth;
+ 		const levels = tex.mipLevelCount;
++		// Mobile adapters may expose only four storage-texture slots. Keep every
++		// mip level, using one read and one write per dispatch on those devices.
++		if ( ( GPU.limits?.maxStorageTexturesPerShaderStage ?? 4 ) < Math.min( 5, levels - 1 ) ) {
++
++			this.lowBindingSteps = [];
++			for ( let level = 1; level < levels; level ++ ) {
++
++				const kernel = new ComputeKernel( {
++					label: label + ' mobile mip ' + level,
++					bindings: {
++						mipSource: { texture: tex, view: { dimension: '2d-array', baseMipLevel: level - 1, mipLevelCount: 1 } },
++						mipDestination: { storageTexture: tex, access: 'write', view: { dimension: '2d-array', baseMipLevel: level, mipLevelCount: 1 } },
++					},
++					workgroupSize: [ 8, 8, 1 ],
++					code: /* wgsl */`
++@compute @workgroup_size( WG_X, WG_Y, WG_Z )
++fn main( @builtin( global_invocation_id ) gid: vec3u ) {
++	if ( any( gid.xy >= textureDimensions( mipDestination ) ) ) { return; }
++	let p = vec2i( gid.xy * 2u );
++	let layer = i32( gid.z );
++	let value = ( textureLoad( mipSource, p, layer, 0 )
++		+ textureLoad( mipSource, p + vec2i( 1, 0 ), layer, 0 )
++		+ textureLoad( mipSource, p + vec2i( 0, 1 ), layer, 0 )
++		+ textureLoad( mipSource, p + vec2i( 1, 1 ), layer, 0 ) ) * 0.25;
++	textureStore( mipDestination, gid.xy, layer, value );
++}`,
++				} );
++				const size = res >> level;
++				this.lowBindingSteps.push( { kernel, groups: kernel.groups( size, size, this.layers ) } );
++
++			}
++			return;
++
++		}
+ 		const top = Math.min( 5, levels - 1 );
+ 		const out = ( l ) => ( { storageTexture: tex, access: 'write', view: { dimension: '2d-array', baseMipLevel: l, mipLevelCount: 1 } } );
+ 		const src = ( l ) => ( { texture: tex, view: { dimension: '2d-array', baseMipLevel: l, mipLevelCount: 1 } } );
+@@ -99,6 +133,12 @@ ${ codeB }
+ 	dispatch( pass = null ) {
+ 
+ 		const o = pass ? { pass } : undefined;
++		if ( this.lowBindingSteps ) {
++
++			for ( const step of this.lowBindingSteps ) step.kernel.dispatch( step.groups, o );
++			return;
++
++		}
+ 		this.kernelA.dispatch( [ this.res / 32, this.res / 32, this.layers ], o );
+ 		if ( this.kernelB ) this.kernelB.dispatch( [ 1, 1, this.layers ], o );
+ 
+diff --git a/src/ocean/OceanFFT.js b/src/ocean/OceanFFT.js
+index 40fb45a..9d8c542 100644
+--- a/src/ocean/OceanFFT.js
++++ b/src/ocean/OceanFFT.js
+@@ -1,6 +1,7 @@
+ import { Vector4, MathUtils } from '../engine/index.js';
+ import { GPU, UniformBlock, Texture, StorageBuffer, ShaderModule, ComputeKernel, GRAVITY } from '../engine/webgpu.js';
+ import { commonModule } from '../engine/render/wgsl/common.js';
++import { ComputeMips } from './ComputeMips.js';
+ 
+ // Multi-cascade FFT ocean (Tessendorf) with a Horvath/JONSWAP spectrum.
+ //
+@@ -529,6 +530,14 @@ ${ stages }
+ 		// ---- mip chains in compute (instead of 2 textures x 4 layers x 8 levels of render passes)
+ 		// A: 16x16 threads per 32x32 texel tile of level 0 -> levels 1..5 through workgroup memory
+ 		// B: one 8x8 workgroup per layer -> levels 6..8
++		if ( ( GPU.limits?.maxStorageTexturesPerShaderStage ?? 4 ) < 5 ) {
++
++			this.mipKernelsA = [];
++			this.mipKernelsB = [];
++			this.mobileMipChains = [ new ComputeMips( this.displacementTexture, 'Ocean displacement' ), new ComputeMips( this.derivativeTexture, 'Ocean derivatives' ) ];
++			return;
++
++		}
+ 
+ 		// threads (lx, ly) < width reduce a 2x2 block of `from` (row length 2*width) into `to`
+ 		const reduce = ( from, to, width, lvl, t ) => {
+@@ -628,6 +637,7 @@ ${ reduce( 's7', null, 1, 8, t ) }
+ 			this.columnKernel.dispatch( [ N, C, 1 ], { pass } );
+ 			for ( const k of this.mipKernelsA ) k.dispatch( [ N / 32, N / 32, C ], { pass } );
+ 			for ( const k of this.mipKernelsB ) k.dispatch( [ 1, 1, C ], { pass } );
++			for ( const chain of this.mobileMipChains || [] ) chain.dispatch( pass );
+ 
+ 		} );
+ 

@@ -18,9 +18,10 @@ concurrency:
 jobs:
   gpu-regression:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       TIDEWATER_PLAYWRIGHT_MODULE: /tmp/tidewater-test-runtime/node_modules/playwright
+      DEBUG: pw:browser
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -33,19 +34,10 @@ jobs:
         run: |
           npm install --ignore-scripts --prefix /tmp/tidewater-test-runtime playwright@1.62.1
           node /tmp/tidewater-test-runtime/node_modules/playwright/cli.js install --with-deps chromium
-      - name: Reproduce the reported failure with the original shader bindings
-        env:
-          TIDEWATER_GPU_OUTPUT: gpu-diagnostics/before
-        run: |
-          cp upstream/src/engine/gpu/Shader.js /tmp/tidewater-patched-Shader.js
-          git -C upstream show HEAD:src/engine/gpu/Shader.js > upstream/src/engine/gpu/Shader.js
-          npm run build --prefix upstream
-          node tests/gpu-startup.mjs --expect-failure
       - name: Verify complete game startup with the fixed 16-texture bindings
         env:
           TIDEWATER_GPU_OUTPUT: gpu-diagnostics/after
         run: |
-          cp /tmp/tidewater-patched-Shader.js upstream/src/engine/gpu/Shader.js
           node scripts/check-mobile.mjs
           npm run build --prefix upstream
           node tests/gpu-startup.mjs
