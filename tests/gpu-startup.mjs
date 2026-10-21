@@ -27,9 +27,14 @@ const errors = [];
 let report;
 try {
   browser = await chromium.launch({
+    // Use Chrome's current headless compositor; the headless shell cannot
+    // present Dawn Vulkan swap-chain textures through its default GL path.
+    channel: 'chromium',
     executablePath: process.env.TIDEWATER_CHROMIUM || undefined,
     headless: true,
-    args: ['--no-sandbox', '--enable-unsafe-webgpu', '--use-angle=swiftshader', '--disable-dev-shm-usage', '--disable-gpu-watchdog'],
+    args: ['--no-sandbox', '--enable-unsafe-webgpu', '--enable-features=Vulkan',
+      '--use-angle=vulkan', '--use-vulkan=swiftshader', '--use-webgpu-adapter=swiftshader',
+      '--disable-vulkan-surface', '--disable-dev-shm-usage', '--disable-gpu-watchdog'],
   });
   page = await browser.newPage({ viewport: { width: 960, height: 540 }, deviceScaleFactor: 1, hasTouch: true });
   page.on('console', message => {
