@@ -34,6 +34,22 @@ jobs:
         run: |
           npm install --ignore-scripts --prefix /tmp/tidewater-test-runtime playwright@1.62.1
           node /tmp/tidewater-test-runtime/node_modules/playwright/cli.js install --with-deps chromium
+      - name: Verify full-resolution wake physics with actual Vulkan readback
+        run: |
+          node --input-type=module <<'JS'
+          import { createRequire } from 'node:module';
+          import { dirname } from 'node:path';
+          import { spawnSync } from 'node:child_process';
+          const require = createRequire(import.meta.url);
+          const dir = dirname(require(process.env.TIDEWATER_PLAYWRIGHT_MODULE).chromium.executablePath());
+          const result = spawnSync(process.execPath, ['tests/wake-physics-native.mjs'], {
+            stdio: 'inherit', env: { ...process.env,
+              LD_LIBRARY_PATH: dir + ':' + (process.env.LD_LIBRARY_PATH || ''),
+              VK_ICD_FILENAMES: dir + '/vk_swiftshader_icd.json',
+            },
+          });
+          if (result.status !== 0) process.exit(result.status || 1);
+          JS
       - name: Verify complete game startup with the fixed 16-texture bindings
         env:
           TIDEWATER_GPU_OUTPUT: gpu-diagnostics/after

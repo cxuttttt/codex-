@@ -281,3 +281,65 @@ index 40fb45a..9d8c542 100644
  
  		} );
  
+diff --git a/src/ocean/WakeSim.js b/src/ocean/WakeSim.js
+index 6eb8b5d..c48c169 100644
+--- a/src/ocean/WakeSim.js
++++ b/src/ocean/WakeSim.js
+@@ -571,16 +571,34 @@ fn wakeCell( col: u32, row: u32 ) -> vec4f {
+ }
+ `;
+ 
++		// Keeping the long cell-physics function live across FFT barriers can make
++		// portable drivers exhaust their shader compiler. Store its vec4f result in
++		// the existing spectrum buffer first; the FFT, resolution and physics stay identical.
++		const separatePhysics = ( GPU.limits?.maxSampledTexturesPerShaderStage ?? 16 ) <= 16;
++		const physicsBindings = {
++			wakePileTex: { texture: this.pileTex },
++			wakeDisplayOut: { storageTexture: this.display, access: 'write' },
++			wakeAerOut: { storageTexture: this.aerTex, access: 'write' },
++		};
++		if ( separatePhysics ) this.physicsKernel = new ComputeKernel( {
++			label: 'Wake Physics',
++			modules: [ simModule ],
++			bindings: physicsBindings,
++			workgroupSize: [ 8, 8, 1 ],
++			code: cellPhysics + /* wgsl */`
++@compute @workgroup_size( WG_X, WG_Y, 1 )
++fn main( @builtin( global_invocation_id ) gid: vec3u ) {
++	if ( any( gid.xy >= vec2u( WAKE_N ) ) ) { return; }
++	wakeSpec[ gid.y * WAKE_N + gid.x ] = wakeCell( gid.x, gid.y );
++}
++`,
++		} );
+ 		this.rowKernel = new ComputeKernel( {
+ 			label: 'Wake Rows',
+ 			modules: [ simModule ],
+-			bindings: {
+-				wakePileTex: { texture: this.pileTex },
+-				wakeDisplayOut: { storageTexture: this.display, access: 'write' },
+-				wakeAerOut: { storageTexture: this.aerTex, access: 'write' },
+-			},
++			bindings: separatePhysics ? {} : physicsBindings,
+ 			workgroupSize: [ HALF, 1, 1 ],
+-			code: cellPhysics + /* wgsl */`
++			code: ( separatePhysics ? '' : cellPhysics ) + /* wgsl */`
+ var<workgroup> shRow: array<vec4f, ${ N }>;
+ 
+ @compute @workgroup_size( WG_X, 1, 1 )
+@@ -589,7 +607,7 @@ fn main( @builtin( local_invocation_id ) lid: vec3u, @builtin( workgroup_id ) wi
+ 	let row = wid.x;
+ 	for ( var e = 0u; e < 2u; e++ ) {
+ 		let col = t + e * WAKE_HALF;
+-		shRow[ wakeBrev( col ) ] = wakeCell( col, row );
++		shRow[ wakeBrev( col ) ] = ${ separatePhysics ? 'wakeSpec[ row * WAKE_N + col ]' : 'wakeCell( col, row )' };
+ 	}
+ 	workgroupBarrier();
+ ${ stages( 'shRow', [ 0 ], - 1 ) }
+@@ -848,6 +866,7 @@ fn wakeFragment( xz: vec2f ) -> WakeFrag {
+ 
+ 		GPU.computePass( 'Wake', ( pass ) => {
+ 
++			if ( this.physicsKernel ) this.physicsKernel.dispatch( this.physicsKernel.groups( N, N ), { pass } );
+ 			this.rowKernel.dispatch( N, { pass } );
+ 			this.colKernel.dispatch( N, { pass } );
+ 			this.invKernel.dispatch( N, { pass } );

@@ -63,8 +63,7 @@ try {
           stats.completed++;
           return pipeline;
         } catch (error) {
-          stats.failed.push({ ...record, error: error.message });
-          if (stats.failed.length > 4) stats.failed.shift();
+          if (stats.failed.length < 4) stats.failed.push({ ...record, error: error.message });
           throw error;
         } finally { delete stats.active[id]; }
       };
