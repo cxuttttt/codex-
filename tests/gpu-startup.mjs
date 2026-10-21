@@ -41,6 +41,34 @@ try {
     window.__testBindingCounts = [];
     window.__testDeviceLimits = [];
     window.__testStorageLimits = [];
+    window.__testPipelines = { started: 0, completed: 0, active: {}, failed: [] };
+    const modules = new WeakMap();
+    const createModule = GPUDevice.prototype.createShaderModule;
+    GPUDevice.prototype.createShaderModule = function(descriptor) {
+      const module = createModule.call(this, descriptor);
+      modules.set(module, descriptor.code);
+      return module;
+    };
+    for (const [method, kind] of [['createComputePipelineAsync', 'compute'], ['createRenderPipelineAsync', 'render']]) {
+      const create = GPUDevice.prototype[method];
+      GPUDevice.prototype[method] = async function(descriptor) {
+        const stats = window.__testPipelines;
+        const id = ++stats.started;
+        const stages = Object.fromEntries(['compute', 'vertex', 'fragment'].filter(s => descriptor[s]).map(s =>
+          [s, { ...descriptor[s], module: undefined, code: modules.get(descriptor[s].module) }]));
+        const record = { kind, descriptor: { ...descriptor, layout: 'auto', ...stages } };
+        stats.active[id] = record;
+        try {
+          const pipeline = await create.call(this, descriptor);
+          stats.completed++;
+          return pipeline;
+        } catch (error) {
+          stats.failed.push({ ...record, error: error.message });
+          if (stats.failed.length > 4) stats.failed.shift();
+          throw error;
+        } finally { delete stats.active[id]; }
+      };
+    }
     const request = GPUAdapter.prototype.requestDevice;
     GPUAdapter.prototype.requestDevice = async function(descriptor = {}) {
       const device = await request.call(this, {
@@ -74,11 +102,15 @@ try {
     storageLimits: window.__testStorageLimits,
     bindingCounts: window.__testBindingCounts,
     startOverlay: window.__ui?._start,
+    pipelineStats: { started: window.__testPipelines.started, completed: window.__testPipelines.completed,
+      active: Object.values(window.__testPipelines.active).map(p => p.descriptor.label),
+      failed: window.__testPipelines.failed.map(p => ({ label: p.descriptor.label, error: p.error })) },
     canvasSize: Array.from(document.querySelectorAll('canvas')).map(c => [c.width, c.height]),
   }));
   report.consoleErrors = errors;
   await page.screenshot({ path: resolve(out, 'screen.png'), timeout: 60000 });
   await writeFile(resolve(out, 'gpu-startup.json'), JSON.stringify(report, null, 2));
+  await writeFile(resolve(out, 'pipeline-diagnostics.json'), JSON.stringify(await page.evaluate(() => window.__testPipelines), null, 2));
   console.log(JSON.stringify({ ...report, bindingCounts: report.bindingCounts.filter(c => Math.max(c.vertex, c.fragment, c.compute) > 14) }, null, 2));
   assert.ok(report.deviceLimits.length >= 2, 'GPU probe and actual game must both create devices');
   assert.ok(report.deviceLimits.every(n => n === 16), 'Native WebGPU device must enforce 16 sampled textures');
@@ -102,6 +134,7 @@ try {
       const state = await page.evaluate(() => ({ report: window.__TIDE_REPORT__?.(), body: document.body.innerText.slice(-5000) }));
       console.log(JSON.stringify({ state, consoleErrors: errors }, null, 2));
       await writeFile(resolve(out, 'failure.json'), JSON.stringify({ state, consoleErrors: errors }, null, 2));
+      await writeFile(resolve(out, 'pipeline-diagnostics.json'), JSON.stringify(await page.evaluate(() => window.__testPipelines), null, 2));
       await page.screenshot({ path: resolve(out, 'failure.png'), timeout: 15000 });
     } catch (_) {}
   }

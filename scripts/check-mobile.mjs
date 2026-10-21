@@ -11,4 +11,5 @@ for (const name of readdirSync('mobile').filter(x => x.endsWith('.js'))) run(pro
 run(process.execPath, ['--test', 'tests/input.test.mjs']);
 run(process.execPath, ['--test', 'tests/shader-bindings.test.mjs']);
 run(process.execPath, ['--test', 'tests/mip-limit.test.mjs']);
+run(process.execPath, ['--test', 'tests/pipeline-compilation.test.mjs']);
 run(process.execPath, ['test/game-logic.mjs'], resolve('upstream'));

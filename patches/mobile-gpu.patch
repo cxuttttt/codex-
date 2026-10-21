@@ -1,3 +1,81 @@
+--- a/src/engine/gpu/GPU.js
++++ b/src/engine/gpu/GPU.js
+@@ -139,6 +139,9 @@
+ 	// Handles are { pipeline, label }; `pipeline` is null until the compile finishes. Users that must
+ 	// run this frame (compute, post) call ready( handle ), which falls back to a synchronous create.
+ 	_pending: new Set(),
++	_compileActive: 0,
++	_compileWaiting: [],
++	_compileError: null,
+ 	syncCompiles: [], // labels of pipelines needed before their async compile finished (diagnostics)
+ 
+ 	renderPipeline( desc ) {
+@@ -155,24 +158,38 @@
+ 
+ 	_async( desc, kind ) {
+ 
+-		const h = { pipeline: null, label: desc.label, desc, kind, failed: false };
++		const h = { pipeline: null, label: desc.label, desc, kind, failed: false, error: null };
+ 		// started after the current task: a kernel dispatched right after it was made (a one-off bake)
+ 		// compiles once, synchronously, instead of twice
+-		const p = Promise.resolve().then( () => {
++		const p = Promise.resolve().then( async () => {
+ 
+ 			if ( h.pipeline ) return;
+-			const create = kind === 'render' ? this.device.createRenderPipelineAsync : this.device.createComputePipelineAsync;
+-			return create.call( this.device, desc ).then( ( pipeline ) => {
+-
++			// Large shaders can exhaust a mobile driver's compiler when all startup pipelines
++			// are submitted together. Hand a slot directly to the next waiting compile.
++			if ( this._compileActive < 2 ) this._compileActive ++;
++			else await new Promise( ( resolve ) => this._compileWaiting.push( resolve ) );
++			try {
++
++				if ( h.pipeline ) return;
++				const create = kind === 'render' ? this.device.createRenderPipelineAsync : this.device.createComputePipelineAsync;
++				const pipeline = await create.call( this.device, desc );
+ 				if ( ! h.pipeline ) h.pipeline = pipeline;
+ 				h.desc = null;
+ 
+-			}, ( e ) => {
++			} catch ( e ) {
+ 
+ 				h.failed = true;
+-				console.error( `WebGPU: pipeline "${ desc.label }" failed: ${ e.message.split( '\n' ).slice( 0, 6 ).join( '\n' ) }` );
+-
+-			} );
++				h.error = new Error( `WebGPU: pipeline "${ desc.label }" failed: ${ e.message }`, { cause: e } );
++				this._compileError ??= h.error;
++				console.error( h.error.message.split( '\n' ).slice( 0, 6 ).join( '\n' ) );
++
++			} finally {
++
++				const next = this._compileWaiting.shift();
++				if ( next ) next();
++				else this._compileActive --;
++
++			}
+ 
+ 		} ).finally( () => this._pending.delete( p ) );
+ 		this._pending.add( p );
+@@ -183,7 +200,8 @@
+ 	// the pipeline now (synchronous compile when the async one has not finished)
+ 	ready( h ) {
+ 
+-		if ( h.pipeline || h.failed ) return h.pipeline;
++		if ( h.failed ) throw h.error;
++		if ( h.pipeline ) return h.pipeline;
+ 		this.syncCompiles.push( h.label );
+ 		h.pipeline = h.kind === 'render' ? this.device.createRenderPipeline( h.desc ) : this.device.createComputePipeline( h.desc );
+ 		return h.pipeline;
+@@ -194,6 +212,7 @@
+ 	async pipelinesReady() {
+ 
+ 		while ( this._pending.size ) await Promise.all( [ ...this._pending ] );
++		if ( this._compileError ) throw this._compileError;
+ 
+ 	},
+ 
 diff --git a/src/engine/gpu/Shader.js b/src/engine/gpu/Shader.js
 index 1709aaf..50f64ab 100644
 --- a/src/engine/gpu/Shader.js
