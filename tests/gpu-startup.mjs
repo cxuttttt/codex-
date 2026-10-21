@@ -2,10 +2,12 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:http';
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
-import { resolve, extname, sep } from 'node:path';
+import { resolve, extname, sep, dirname } from 'node:path';
 
 const require = createRequire(import.meta.url);
-const { chromium } = require(process.env.TIDEWATER_PLAYWRIGHT_MODULE || 'playwright');
+const playwrightModule = process.env.TIDEWATER_PLAYWRIGHT_MODULE || 'playwright';
+const { chromium } = require(playwrightModule);
+const { PNG } = require(resolve(dirname(require.resolve(playwrightModule)), '../playwright-core/lib/utilsBundle.js'));
 const root = resolve(import.meta.dirname, '../upstream/dist');
 const out = resolve(process.env.TIDEWATER_GPU_OUTPUT || '/tmp/tidewater-gpu-test');
 const expectFailure = process.argv.includes('--expect-failure');
@@ -14,6 +16,11 @@ const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/cs
 const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url, 'http://localhost');
+    if (url.pathname === '/__gpu_probe__') {
+      response.setHeader('Content-Type', 'text/html');
+      response.end('<!doctype html><body style="margin:0;background:red"><canvas width="64" height="64"></canvas>');
+      return;
+    }
     if (url.pathname === '/favicon.ico') { response.writeHead(204); response.end(); return; }
     const file = resolve(root, '.' + decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname));
     if (!file.startsWith(root + sep)) throw new Error('Outside test root');
@@ -25,17 +32,63 @@ await new Promise(done => server.listen(0, '127.0.0.1', done));
 let browser, page;
 const errors = [];
 let report;
+const canvasProbes = [];
 try {
-  browser = await chromium.launch({
-    // Use Chrome's current headless compositor; the headless shell cannot
-    // present Dawn Vulkan swap-chain textures through its default GL path.
-    channel: 'chromium',
-    executablePath: process.env.TIDEWATER_CHROMIUM || undefined,
-    headless: true,
-    args: ['--no-sandbox', '--enable-unsafe-webgpu', '--enable-features=Vulkan',
-      '--use-angle=vulkan', '--use-vulkan=swiftshader', '--use-webgpu-adapter=swiftshader',
-      '--disable-vulkan-surface', '--disable-dev-shm-usage', '--disable-gpu-watchdog'],
-  });
+  // Verify the CI compositor with a real canvas and screenshot before loading
+  // the game. Compute-only WebGPU support does not prove canvas presentation.
+  const common = ['--no-sandbox', '--enable-unsafe-webgpu', '--disable-dev-shm-usage', '--disable-gpu-watchdog'];
+  const backends = [
+    ['--use-angle=swiftshader', '--enable-features=Vulkan', '--use-vulkan=swiftshader', '--disable-vulkan-surface'],
+    ['--use-angle=swiftshader'],
+    ['--use-angle=vulkan', '--enable-features=Vulkan', '--use-vulkan=swiftshader', '--disable-vulkan-surface', '--ozone-platform=headless'],
+    ['--use-angle=swiftshader', '--enable-features=Vulkan,VulkanFromANGLE,DefaultANGLEVulkan', '--use-vulkan=swiftshader', '--disable-vulkan-surface'],
+  ];
+  for (const args of backends) {
+    let probe;
+    try {
+      browser = await chromium.launch({ channel: 'chromium',
+        executablePath: process.env.TIDEWATER_CHROMIUM || undefined,
+        headless: true, args: [...common, ...args], timeout: 15000 });
+      probe = await browser.newPage({ viewport: { width: 64, height: 64 } });
+      await probe.goto(`http://127.0.0.1:${server.address().port}/__gpu_probe__`);
+      const info = await probe.evaluate(() => Promise.race([
+        (async () => {
+          const adapter = await navigator.gpu.requestAdapter();
+          if (!adapter) throw new Error('No WebGPU adapter');
+          const device = await adapter.requestDevice();
+          const context = document.querySelector('canvas').getContext('webgpu');
+          context.configure({ device, format: navigator.gpu.getPreferredCanvasFormat(), alphaMode: 'opaque',
+            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_DST });
+          const encoder = device.createCommandEncoder();
+          const pass = encoder.beginRenderPass({ colorAttachments: [{
+            view: context.getCurrentTexture().createView(), clearValue: { r: .2, g: .6, b: .35, a: 1 },
+            loadOp: 'clear', storeOp: 'store',
+          }] });
+          pass.end();
+          device.queue.submit([encoder.finish()]);
+          await device.queue.onSubmittedWorkDone();
+          await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)));
+          return { vendor: adapter.info.vendor, description: adapter.info.description };
+        })(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Canvas GPU probe timed out')), 10000)),
+      ]));
+      const screenshot = await probe.screenshot({ timeout: 10000 });
+      const png = PNG.sync.read(screenshot);
+      const rgba = Array.from(png.data.subarray((32 * png.width + 32) * 4, (32 * png.width + 32) * 4 + 4));
+      assert.ok([51, 153, 89, 255].every((n, i) => Math.abs(n - rgba[i]) <= 3), `Canvas screenshot pixel: ${rgba}`);
+      canvasProbes.push({ args, info, rgba, success: true });
+      await writeFile(resolve(out, 'canvas-probe.png'), screenshot);
+      await probe.close();
+      break;
+    } catch (error) {
+      canvasProbes.push({ args, success: false, error: error.message });
+      await browser?.close();
+      browser = null;
+    }
+  }
+  await writeFile(resolve(out, 'canvas-probes.json'), JSON.stringify(canvasProbes, null, 2));
+  console.log('CI canvas presentation:', JSON.stringify(canvasProbes));
+  assert.ok(browser, 'CI must successfully render and capture a real WebGPU canvas before testing the game');
   page = await browser.newPage({ viewport: { width: 960, height: 540 }, deviceScaleFactor: 1, hasTouch: true });
   page.on('console', message => {
     if (message.type() === 'error') errors.push(message.text());
@@ -111,6 +164,7 @@ try {
       failed: window.__testPipelines.failed.map(p => ({ label: p.descriptor.label, error: p.error })) },
     canvasSize: Array.from(document.querySelectorAll('canvas')).map(c => [c.width, c.height]),
   }));
+  report.canvasProbes = canvasProbes;
   report.consoleErrors = errors;
   await page.screenshot({ path: resolve(out, 'screen.png'), timeout: 60000 });
   await writeFile(resolve(out, 'gpu-startup.json'), JSON.stringify(report, null, 2));
